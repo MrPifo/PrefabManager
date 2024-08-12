@@ -1,5 +1,3 @@
-using BattleTanks.Interfaces;
-using Sperlich.PrefabManager;
 using System.Collections;
 using UnityEngine;
 
@@ -8,11 +6,10 @@ namespace Sperlich.PrefabManager {
 	/// This is a generic Script you can attach to a pooled GameObject
 	/// </summary>
 	public class PoolGameObject : MonoBehaviour, IRecycle {
-		public PoolData.PoolObject PoolObject { get; set; }
 
 		public void Recycle() {
 			// TODO:
-			PrefabManager.FreeGameObject(this);
+			PrefabManager.Free(this);
 		}
 
 		public void Recycle(float delay) {

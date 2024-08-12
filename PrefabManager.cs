@@ -1,75 +1,143 @@
-using BattleTanks.Interfaces;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using Unity.VisualScripting.YamlDotNet.Core.Tokens;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using static Sperlich.PrefabManager.AutoLoader;
 
 namespace Sperlich.PrefabManager {
-	[SingletonPrefab(false, true, true)]
-	public class PrefabManager : SingleMonoPrefab<PrefabManager> {
+	public static class PrefabManager {
 
-		[SerializeField]
-		private List<PrefabInfo> prefabs;
-		private List<PoolData> Pools;
+		internal static Transform container;
+		internal static PoolGameObject helper;
+		internal static List<PoolPrefab> prefabs = new();
+		private static List<Pool> pools = new();
 
+		private static Scene _mainScene = default;
+		public static bool EnableAutoInit { get; set; } = true;
+		public static bool MovePoolObjectToMainScene { get; set; } = false;
 		public static string DefaultSceneSpawn { get; set; }
+		public static Scene MainScene {
+			get {
+				if (_mainScene == default) {
+					for (int i = 0; i < SceneManager.sceneCount; i++) {
+						Scene s = SceneManager.GetSceneAt(i);
+						
+						if (s.name == DefaultSceneSpawn) {
+							_mainScene = s;
+							break;
+						}
+					}
+				}
 
-		public static void Initialize() => Initialize(AutoLoader.Prefabs.Values.ToArray(), SceneManager.GetActiveScene().name);
-		public static void Initialize(string defaultScene) => Initialize(AutoLoader.Prefabs.Values.ToArray(), defaultScene);
-		public static void Initialize(PrefabInfo[] prefabs, string defaultScene) {
-			Instance = GetSingleInstance<PrefabManager>();
-			DefaultSceneSpawn = defaultScene;
-			Instance.prefabs = new List<PrefabInfo>(prefabs);
-			Instance.CreatePools();
-
-			Debug.Log("Prefabmanager intialized.");
-		}
-
-		private void CreatePools() {
-			Pools = new List<PoolData>();
-			foreach (PrefabInfo info in prefabs) {
-				GameObject p = new GameObject(info.prefab.name);
-				p.transform.SetParent(transform);
-				PoolData pool = p.AddComponent<PoolData>();
-				pool.Initialize(info);
-				Pools.Add(pool);
+				return _mainScene;
 			}
 		}
 
+		[RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+		public static void AutoInit() {
+			if(EnableAutoInit) {
+				AutoLoader.Initialize();
+				Initialize();
+			}
+		}
+		public static void Initialize() => Initialize(AutoLoader.Prefabs.Values.ToArray(), null);
+		public static void Initialize(string defaultScene) => Initialize(AutoLoader.Prefabs.Values.ToArray(), defaultScene);
+		public static void Initialize(PrefabInfo[] prefabs, string defaultScene) {
+			ResetPrefabManager();
+			container = new GameObject("PrefabManager").transform;
+			helper = new GameObject("Prefabmanager Helper").AddComponent<PoolGameObject>();
+			UnityEngine.Object.DontDestroyOnLoad(container.gameObject);
+			UnityEngine.Object.DontDestroyOnLoad(helper.gameObject);
+			helper.gameObject.hideFlags = HideFlags.HideInInspector | HideFlags.HideInHierarchy | HideFlags.HideAndDontSave;
+			DefaultSceneSpawn = defaultScene == string.Empty ? string.Empty : defaultScene;
+			PrefabManager.prefabs = new();
+
+			foreach(PrefabInfo p in prefabs) {
+				if(p.attribute is PoolPrefabAttribute poolPrefabAttr) {
+					PoolPrefab info = new PoolPrefab() {
+						name = ToCleanString(p.Name),
+						prefab = p.prefab,
+						type = GetPrefabTypeFromName(p.Name),
+						preloadAmount = poolPrefabAttr.preloadAmount
+					};
+
+					PrefabManager.prefabs.Add(info);
+				}
+			}
+			CreatePools();
+			
+			Debug.Log("Prefabmanager intialized.");
+		}
+
+		static void CreatePools() {
+			pools = new List<Pool>();
+
+			foreach (var info in prefabs) {
+				var pool = new Pool(info);
+				pools.Add(pool);
+			}
+		}
+
+		#region API
+		/// <summary>
+		/// Must be called to free a GameObject so that it can be recycled.
+		/// </summary>
+		/// <param name="gameobject"></param>
+		/// <param name="delay"></param>
+		public static void Free(IRecycle rec, float delay = 0f) {
+			try {
+				Pool pool = GetPool(rec);
+				Pool.PoolObject poolObject = pool.pooledObjects[rec];
+
+				if (poolObject.isBeingFreed) {
+					return;
+				}
+				if (delay == 0) {
+					poolObject.isBeingFreed = false;
+					pool.FreeGameObject(rec);
+				} else {
+					poolObject.isBeingFreed = true;
+					helper.StartCoroutine(IDelay());
+
+					IEnumerator IDelay() {
+						yield return new WaitForSeconds(delay);
+						pool.FreeGameObject(rec);
+						poolObject.isBeingFreed = false;
+					}
+				}
+			} catch (Exception e) {
+				Debug.LogError($"PrefabManager failed to free the GameObject {rec} \n" + e.StackTrace);
+			}
+		}
 		/// <summary>
 		/// Call this to reset and delete all gameobjects that have been spawned with the manager.
 		/// </summary>
 		public static void ResetPrefabManager() {
-			Initialize(DefaultSceneSpawn);
-			/*if(Pools != null) {
-				foreach(PoolData pool in Pools) {
-					foreach(PoolData.PoolObject op in pool.pooledObjects) {
-						if(Application.isPlaying) {
-							Destroy(op.storedObject);
-						} else {
-							DestroyImmediate(op.storedObject);
-						}
-					}
-				}
-				for(int i = 0; i < Pools.Count; i++) {
-					if(Pools[i] != null) {
-						if(Application.isPlaying) {
-							Destroy(Pools[i].gameObject);
-						} else {
-							DestroyImmediate(Pools[i].gameObject);
-						}
+			if(pools != null) {
+				foreach(Pool pool in pools) {
+					foreach(var val in pool.pooledObjects) {
+						val.Key.Recycle();
 					}
 				}
 			}
 
-			Pools = new List<PoolData>();
-			HasBeenInitialized = false;
-			SLog.Log(Category.System, "Prefabmanager has been reset.");*/
-		}
+			pools.Clear();
 
+			if (container != null) {
+				UnityEngine.Object.Destroy(container.gameObject);
+			}
+			if(helper != null) {
+				UnityEngine.Object.Destroy(helper.gameObject);
+			}
+		}
+		#endregion
+
+		#region Instance-API
 		/// <summary>
 		/// Instantiates and returns the GameObject.
 		/// </summary>
@@ -80,7 +148,7 @@ namespace Sperlich.PrefabManager {
 		/// <returns></returns>
 		public static GameObject Instantiate(Prefabs type, Transform parent, Vector3 position = new Vector3(), Quaternion rotation = new Quaternion()) {
 			try {
-				GameObject o = Instantiate(GetPrefabData(type).prefab, position, rotation, parent);
+				GameObject o = UnityEngine.Object.Instantiate(GetPrefabData(type).prefab, position, rotation, parent);
 				o.SetActive(true);
 				return o;
 			} catch (Exception e) {
@@ -124,11 +192,10 @@ namespace Sperlich.PrefabManager {
 			}
 			return instance.GetComponent<T>();
 		}
-
 		public static T Instantiate<T>(GameObject @object, Transform parent = null, Vector3 position = new Vector3(), Quaternion rotation = new Quaternion()) {
 			GameObject instance = UnityEngine.Object.Instantiate(@object, position, rotation, parent);
 			if (instance.TryGetComponent(out T component) == false) {
-				DestroyImmediate(instance);
+				UnityEngine.Object.DestroyImmediate(instance);
 				UnityEngine.Debug.LogError($"Failed to instantiate GameObject. Component {typeof(T).Name} could not be found.");
 			}
 			if (instance.scene.name != DefaultSceneSpawn && SceneManager.GetSceneByName(DefaultSceneSpawn).IsValid()) {
@@ -138,29 +205,6 @@ namespace Sperlich.PrefabManager {
 		}
 
 		public static GameObject Spawn(Prefabs type, Vector3 position = new Vector3(), Quaternion rotation = new Quaternion()) => Spawn(type, null, position, rotation);
-		/// <summary>
-		/// Returns the required GameObject without creating a new one. If no stored GameObject is available though, a new one will be generated and stored for reuse.
-		/// </summary>
-		/// <param name="type"></param>
-		/// <param name="parent"></param>
-		/// <param name="position"></param>
-		/// <param name="rotation"></param>
-		/// <returns></returns>
-		public static GameObject Spawn(Prefabs type, Transform parent, Vector3 position = new Vector3(), Quaternion rotation = new Quaternion()) {
-			try {
-				PoolData pool = GetPool(type);
-				PoolData.PoolObject poolObject = pool.FetchFreePoolObject();
-				if (parent != null) {
-					poolObject.storedObject.transform.SetParent(parent);
-				}
-				poolObject.storedObject.transform.SetPositionAndRotation(position, rotation);
-				poolObject.storedObject.SetActive(true);
-				return poolObject.storedObject;
-			} catch(Exception e) {
-				Debug.LogError($"PrefabManager failed to spawn {type}. \n" + e.StackTrace);
-				return null;
-			}
-        }
 		/// <summary>
 		/// Returns the required GameObject without creating a new one. If no stored GameObject is available though, a new one will be generated and stored for reuse.
 		/// </summary>
@@ -191,71 +235,109 @@ namespace Sperlich.PrefabManager {
 		public static T Spawn<T>(Prefabs type, Transform parent, Vector3 position = new Vector3(), Quaternion rotation = new Quaternion()) {
 			return Spawn(type, parent, position, rotation).GetComponent<T>();
 		}
-
 		/// <summary>
-		/// Must be called to free a GameObject so that it can be recycled.
+		/// Returns the required GameObject without creating a new one. If no stored GameObject is available though, a new one will be generated and stored for reuse.
 		/// </summary>
-		/// <param name="gameobject"></param>
-		/// <param name="delay"></param>
-		public static void FreeGameObject(IRecycle gameobject, float delay = 0f) {
+		/// <param name="type"></param>
+		/// <param name="parent"></param>
+		/// <param name="position"></param>
+		/// <param name="rotation"></param>
+		/// <returns></returns>
+		public static GameObject Spawn(Prefabs type, Transform parent, Vector3 position = new Vector3(), Quaternion rotation = new Quaternion()) {
 			try {
-				if(gameobject.PoolObject == null) {
-					Debug.LogError($"Error: Tried to recycle a GameObject that has not been spawned with the PrefabManager!" );
-					return;
+				Pool pool = GetPool(type);
+				Pool.PoolObject poolObject = pool.FetchFreePoolObject();
+				GameObject obj = poolObject.storedObject;
+
+				if (parent != null) {
+					obj.transform.SetParent(parent);
+				} else if(MovePoolObjectToMainScene && MainScene != default) {
+					obj.transform.SetParent(null);
+					SceneManager.MoveGameObjectToScene(obj, MainScene);
+				} else if(MovePoolObjectToMainScene) {
+					obj.transform.SetParent(null);
 				}
-				if (delay == 0) {
-					PoolData pool = GetPool(gameobject.PoolObject.type);
-					pool.FreeGameObject(gameobject.PoolObject);
-				} else {
-					Instance.StartCoroutine(IDelay());
 
-					IEnumerator IDelay() {
-						float time = 0;
+				obj.transform.SetPositionAndRotation(position, rotation);
+				obj.SetActive(true);
 
-						while(time < delay) {
-							time += Time.deltaTime;
-							yield return null;
-						}
-
-						PoolData pool = GetPool(gameobject.PoolObject.type);
-						pool.FreeGameObject(gameobject.PoolObject);
-					}
-				}
-			} catch(Exception e) {
-				Debug.LogError($"PrefabManager failed to free the GameObject {gameobject} \n" + e.StackTrace);
+				return poolObject.storedObject;
+			} catch (Exception e) {
+				Debug.LogError($"PrefabManager failed to spawn {type}. \n" + e.Message);
+				return null;
 			}
 		}
+		#endregion
 
-		public static bool ContainsPrefab(string name) {
+		internal static Prefabs GetPrefabTypeFromName(string name) {
+			name = ToCleanString(name);
+
+			foreach(var e in Enum.GetValues(typeof(Prefabs))) {
+				Prefabs prefab = (Prefabs)e;
+				string compareName = ToCleanString(prefab.ToString());
+				
+				if (name == compareName) {
+					return prefab;
+				}
+			}
+			
+			throw new KeyNotFoundException($"Failed to find the corresponding PrefabType for {name}");
+		}
+		internal static bool ContainsPrefab(string name) {
+			name = ToCleanString(name);
+
 			foreach(var e in Enum.GetNames(typeof(Prefabs))) {
-				if(e.ToLower() == name) {
+				if(ToCleanString(e) == name) {
 					return true;
 				}
 			}
 			return false;
 		}
-
-		public static PrefabInfo GetPrefabData(Enum en) => GetPrefabData(en.ToString());
-		public static PrefabInfo GetPrefabData(string prefabType) {
-			PrefabInfo info = Instance.prefabs.Where(p => p.prefab.name.ToLower() == prefabType.ToLower()).FirstOrDefault();
-			if(info == null) {
+		internal static PoolPrefab GetPrefabData(Enum e) {
+			return prefabs.Where(p => p.type.ToString() == e.ToString()).First();
+		}
+		internal static PoolPrefab GetPrefabData(string prefabType) {
+			PoolPrefab info = prefabs.Where(p => ToCleanString(p.prefab.name) == ToCleanString(prefabType)).FirstOrDefault();
+			if (info == null) {
 				Debug.LogError($"No PrefabInfo found for {prefabType}.");
 				//throw new NullReferenceException();
 			}
-			if(info.prefab == null) {
+			if (info.prefab == null) {
 				Debug.LogError($"Prefab not set for {prefabType}.");
 				//throw new NullReferenceException();
 			}
 			return info;
 		}
-		public static PoolData GetPool(PrefabInfo info) => GetPool(info.Name);
-		public static PoolData GetPool(Enum en) => GetPool(en.ToString());
-		public static PoolData GetPool(string prefabType) {
-			return Instance.Pools.Where(p => p.prefabInfo.prefab.name.ToLower() == prefabType.ToLower()).FirstOrDefault();
-			/*if(pool == null) {
-				SLog.Error($"No Pool found for {prefabType}.");
+		internal static Pool GetPool(IRecycle rec) {
+			foreach(var pool in pools) {
+				if (pool.pooledObjects.Keys.Contains(rec)) {
+					return pool;
+				}
 			}
-			return pool;*/
+
+			throw new NullReferenceException("Failed to retrieve the pool. Perhaps you tried to free a non-pool gameobject?");
+		}
+		internal static Pool GetPool(PoolPrefab info) => GetPool(info.name);
+		internal static Pool GetPool(Enum en) => GetPool(en.ToString());
+		internal static Pool GetPool(string prefabType) {
+			return pools.Where(p => ToCleanString(p.prefabInfo.prefab.name) == ToCleanString(prefabType)).First();
+		}
+		internal static string ToCleanString(string input) {
+			// Remove all non-alphanumeric characters
+			input = Regex.Replace(input, @"[^a-zA-Z0-9]", "");
+
+			// Remove leading digits
+			input = Regex.Replace(input, @"^\d+", "");
+
+			// If the string is empty after cleaning, return "enumvalue" (or another default value)
+			if (string.IsNullOrEmpty(input)) {
+				return "none";
+			}
+
+			// Convert to lowercase
+			input = input.ToLower();
+
+			return input;
 		}
 	}
 }
